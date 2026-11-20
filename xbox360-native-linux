@@ -1,0 +1,161 @@
+name: xbox360-native-linux
+description: "Create, bring up, or debug a native Xbox 360 static recompilation for Linux using a guest-to-C++ translator and runtime. Covers executable analysis, code generation, SDK ABI, graphics, audio, storage, input, and evidence-based validation. Use for native port development, not emulator configuration or a generic Linux game build."
+---
+
+# Xbox 360 Native Linux Port
+
+Turn a specific Xbox 360 executable revision into a reproducible Linux native
+program backed by the required kernel, graphics, audio, storage and input
+services. Translation success alone does not establish a playable port.
+
+Read the target repository's agent instructions and identify the working
+baseline before changing tools or launch flags. Pin title/media ID, executable
+hash, title update, SDK/translator revision, compiler, standard library and
+target CPU. Do not replace a working toolchain with a newer one incidentally.
+
+For the IM2-derived mechanisms and their actual limits, read
+[references/im2-lessons.md](references/im2-lessons.md) when diagnosing matching
+audio, stencil, storage or toolchain symptoms. Its addresses and settings are
+examples for that title, not defaults for another game.
+
+## 1. Establish the inputs and toolchain
+
+- Use the user's supplied extraction, retaining file names/case and required
+  resources. Identify the entry XEX and any title DLLs or update patches.
+  Keep original input immutable; place extracted images, translated game code,
+  captured shaders, saves and raw samples outside version-controlled output.
+- Inspect ELF target/CPU requirements and available RAM, disk, VRAM and
+  thermals before expensive builds. Use the repository preflight if available,
+  choose a bounded job count and keep long builds logged; avoid stacked builds.
+- Separate translator and runtime responsibilities. XenonRecomp emits C++ and
+  needs a compatible runtime. ReXGlue supplies its own codegen and runtime.
+  Determine which output the native build actually consumes; do not link two
+  translators' generated functions together or require a redundant translation.
+- Check the installed tools' help and matching source/docs. Treat sample CLI
+  flags, manifests and SDK filenames as versioned interfaces. Missing system
+  development headers are a build dependency issue, not a reason to alter ABI
+  checks or require privilege changes. Respect the environment's permissions.
+
+## 2. Recover code faithfully
+
+Recover entry points, imports, register save/restore helpers, function extents,
+indirect-call targets and switch tables for this revision. Inspect disassembly
+around an unresolved call or branch; a tail branch need not target a function
+start. A pattern analyzer returning zero switch tables can mean its patterns
+do not match this compiler, rather than the title having no switches.
+
+Keep overrides and instrumentation in manifests, source hooks or maintained
+patches so regeneration preserves them. Do not silence unsupported-instruction
+warnings or add placeholder returns merely to reach zero errors. Validate
+added arithmetic carry/overflow, condition-register behavior, vector element
+ordering and floating-point semantics with meaningful edge cases.
+
+Guest memory and command streams are big-endian where the guest interfaces
+specify it. Distinguish native host values, guest addresses, packed structures
+and GPU words; never decode a PM4 dump as little-endian solely because the
+host is x86-64. Preserve guest pointer widths and hook calling conventions.
+
+For an installed ReXGlue matching the checked CLI, an example project flow is:
+
+```bash
+# Set PORT_NAME, PORT_ROOT, GAME_ROOT, XEX and REXGLUE to this title's paths.
+"$REXGLUE" init --project-name "$PORT_NAME" \
+  --xex-path "$XEX" --project-root "$PORT_ROOT"
+cd "$PORT_ROOT"
+"$REXGLUE" codegen "${PORT_NAME}_manifest.toml"
+```
+
+Inspect the generated manifest's game root, entrypoint and hook sources before
+building. The project name must also be suitable for generated C++ identifiers.
+Use the pinned release's schema for missing-function/size overrides. Preserve
+codegen diagnostics and unresolved-target reports; do not infer completeness
+from generated file count. These roles and project commands are documented by
+[ReXGlue](https://docs.rexglue.com/getting-started/).
+
+## 3. Build against the real SDK ABI
+
+Use the SDK's required Clang/C++ standard and standard-library major version.
+For this project's prebuilt Linux SDK, that library is GCC 13 libstdc++.
+Header compatibility at compile time is distinct from the minimum runtime
+GLIBC/GLIBCXX symbol versions needed on another machine.
+
+Check the compiler's actual include search paths. Use a valid GCC installation
+directory when appropriate; for Homebrew's different layout, explicit verified
+GCC 13 `-nostdinc++`/`-isystem` paths were required. Never change a macro or
+remove the CMake guard to conceal incompatible C++ class layouts.
+
+Inspect generated presets rather than assuming compiler paths exist:
+
+```bash
+cmake --list-presets
+# Configure the selected Linux preset with the verified compiler/header paths.
+cmake --build out/build/linux-amd64 --config Debug --parallel "$BUILD_JOBS"
+```
+
+Use the SDK integration helpers for host code and target linkage. In the IM2
+build, host export registrations must remain in an OBJECT library because an
+unreferenced STATIC archive can discard them. Verify the equivalent rule in
+the target SDK. Prefer source hooks over hand-edited generated C++.
+
+If only a prebuilt SDK is available, a narrowly scoped C/opaque-pointer
+adapter can avoid exchanging SDK C++ layouts. Validate public symbol binding,
+arguments, results and scope; do not deploy private offsets from a one-off
+binary audit. Do not load a second copy of the SDK to find an original symbol.
+
+## 4. Bring up the runtime one boundary at a time
+
+Create a reproducible launcher with an explicit game root, writable user-data
+root, actual module/library paths and console logging. Keep configuration and
+saves separate from game assets. Start conservatively; retain working fixes
+while diagnosing another subsystem. Read the installed SDK's real setting
+registry rather than adding guessed flags from another emulator or fork.
+
+| Symptom | Establish before patching |
+| --- | --- |
+| Black window / no menu | Window creation, presenter/swapchain, executable entry, guest threads, intro duration and actual asset opens |
+| Red flashes / wrong lighting | Which render pass/transfer shader is wrong; source stencil/depth behavior; exact affected shader identity |
+| Squealing / robotic audio | Guest callback cadence, queue credits, sample rate/block size, sample layout and repeat patterns before/after host conversion |
+| Device missing / save fails | Content mount, real write result, event/IOSB state and the game's completion branch; successful host I/O is not game-level success |
+| Controller absent | Actual loaded SDL version, enumeration and mapping, then Steam Input if applicable |
+| Abort after quit | Timing relative to termination, interrupted waits and shutdown state; separate timeout-induced termination from a running-game failure |
+
+Use bounded instrumentation and existing captures first. Do not autoplay
+distorted samples or request repeated GPU/audio runs after a reported host
+failure when an offline check can answer the question.
+
+## 5. Preserve mechanics while adapting fixes
+
+For audio, trace the title's registered render callback into its mixer. If
+cadence is wrong, pace before mixing at `sample_rate / samples_per_block`,
+retaining SDK back-pressure. Use monotonic per-client schedules, fractional
+period accounting and stall rebasing without catch-up bursts. Do not equate
+audio blocks with video FPS or double-pace a callback already fixed upstream.
+
+For stencil transfer problems, validate SPIR-V and exact driver-bound shader
+replacement before claiming a visual correction. Match precisely; do not
+disable stencil broadly or copy a title's captured shader arrays to another.
+
+For async saves, preserve the original write, real completion data and failure
+paths. A successful write reported as pending is appropriate only when traced
+game behavior requires it and narrow caller/size/event guards are established.
+Do not globally transform successful writes into pending operations.
+
+## 6. Validate and leave a usable port
+
+Use deterministic or controlled tests for new translation semantics, adapter
+forwarding, callback timing, symbol scope, failures and opt-outs. Loader-only
+checks must not be described as a game run. Then validate menus and the
+affected gameplay with actual output, including sound, controls, pause/resume,
+save/relaunch/load and exit as relevant. Respect existing authorization and
+the machine's demonstrated stability when choosing runtime tests.
+
+Record executable/module hashes, SDK versions, timestamped logs, launch flags,
+test results and their limits. Track translated, built, booting, menu reached,
+gameplay working and progression persistence separately. A startup screenshot
+does not measure audio quality, gameplay correctness or sustained FPS.
+
+Deliver maintained manifests/hooks, build and launch instructions, compatible
+modules, evidence and remaining issues. Preserve local user saves. Keep private
+game assets/code/shader captures out of public commits and distinguish a private
+user bundle from a releasable port. Leave Deck packaging as a separate stage
+once the Linux baseline is understood.
