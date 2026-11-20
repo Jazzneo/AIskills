@@ -1,0 +1,169 @@
+---
+name: xbox360-steam-deck
+description: "Adapt and package an existing native Xbox 360 Linux recompilation for Steam Deck. Covers x86-64 and runtime compatibility, movable bundles, window sizing, graphics profiles, Steam Input, transfer permissions, preserved fixes and saves, and staged on-device validation. Use for native ports, not Xbox emulator or Proton setup."
+---
+
+# Xbox 360 Native Port for Steam Deck
+
+Produce a movable native Linux package with suitable display/input settings
+and the port's working runtime fixes. Begin with an understood Linux baseline;
+do not treat copying a desktop executable as proof of Deck compatibility.
+
+Read repository agent instructions and preserve the existing title/SDK
+revision, user saves and working audio/storage/graphics fixes. For concrete
+IM2 package paths, dependency versions, permission failure and user evidence,
+read [references/im2-deck-case.md](references/im2-deck-case.md) when adapting
+that implementation. It describes one successful startup, not a universal
+runtime package or measured performance profile.
+
+## 1. Identify the real portability requirements
+
+Steam Deck uses an AMD x86-64 CPU, not ARM64. Check the executable and every
+SDK/module/adapter's architecture, CPU instruction requirements, dynamic
+dependencies, interpreter, RPATH/RUNPATH and required symbol versions:
+
+```bash
+readelf -h "$GAME_BINARY"
+readelf -l "$GAME_BINARY"
+readelf -d "$GAME_BINARY"
+readelf --version-info "$GAME_BINARY"
+```
+
+Repeat dependency/version inspection for plugin libraries and the actual SDL
+library. A startup-linked dependency check alone misses libraries loaded later
+through `dlopen`. Compare with the target Deck's installed runtime instead of
+guessing its glibc version from a distribution name. Do not bundle desktop
+NVIDIA drivers or assume the desktop Vulkan path behaves identically on RADV.
+
+Prefer building against a compatible baseline when a valid toolchain exists.
+If the existing binary needs newer libraries, a private loader/library set is
+an option to evaluate, not a requirement for every title. Keep matching glibc
+loader/libc/libm and compatibility libraries together; include a compatible
+C++ runtime without bypassing the SDK's compile-time ABI contract. Keep
+licenses/provenance. Never patch symbol versions merely to hide requirements.
+
+With a private loader, isolate library paths/preloads to the game process.
+Keep host Vulkan/Mesa and audio/display backends OS-provided. Do not install
+the private libc into SteamOS or export it into the desktop session. Direct
+loader execution affects executable-path discovery: verify `/proc/self/exe`,
+SDK plugin lookup, working directory and explicit app paths agree. A loader
+beside the executable/modules resolved that issue for IM2.
+
+## 2. Make the package movable
+
+Derive the bundle root from the launcher location, quote paths, and test a
+folder with spaces. Bundle the executable, required modules, actual SDL file,
+title-specific adapters and their manifests. Replace PC-only absolute paths
+in Vulkan layer manifests with valid relative library paths. Resolve only
+existing loaded SDK/SDL objects when an interposer needs the original symbol.
+
+Separate source templates from assembled files. Preserve profile edits on
+refresh; make it explicit whether a launcher reads a profile before or after
+environment defaults. Keep saves in a writable destination-user data root,
+outside the game assets; copy existing saves only when requested. Keep logs
+accessible and retain a useful exit code. A private asset-containing bundle
+is not automatically a distributable release.
+
+For updates containing scripts/documentation only, synchronize the relevant
+files and create a small update archive if useful. Avoid recopying gigabytes
+of assets or rebuilding the game for that change. Record original assembly
+hashes separately from later user validation and link validation to its
+reference build; do not apply an old success claim to changed binaries.
+
+## 3. Configure a window and a conservative image profile
+
+The Deck's 1280x800 display can show a 16:9 title in a 1280x720 window without
+stretching; a smaller 1152x648 request leaves room for desktop decorations.
+Choose the title's actual aspect ratio rather than stretching every game to
+16:10. Desktop Mode supports desktop windows; Gaming Mode's compositor may
+present a window differently. Window dimensions and internal rendering
+resolution are separate settings.
+
+Confirm that the runtime honors its window-size settings. In IM2's SDK build
+they were ignored. A narrowly scoped SDL3 adapter corrected creation/resize,
+minimum dimensions and fullscreen for the title's Vulkan window while leaving
+helper windows untouched. Prefer a supported SDK implementation or source fix
+when available; do not copy that adapter into another title without checking
+window identification, ABI, lifetime and symbol scope.
+
+For this ReXGlue generation, an initial profile to evaluate is:
+
+| Setting | Starting value / reason |
+| --- | --- |
+| Window | 1280x720 for a 16:9 title; retain letterboxing |
+| Draw resolution scale | 1x until higher scales and shader fixes are validated |
+| Post-process AA | FXAA to reduce jagged edges; stronger AA may soften detail |
+| Texture filtering | 8x anisotropic when affordable; enum `4` in this SDK, not literal `8` |
+| Frame cap / VSync | Try 30 FPS and VSync; measure before promising stable performance |
+| Render path | Preserve the port's verified path; IM2 required FBO |
+
+Check setting names/ranges in the installed SDK. Do not invent a scaling,
+sharpening or resolution flag. FXAA/filtering cannot recreate absent texture
+detail, and supersampling can change shader keys as well as GPU cost. Use
+the [ReXGlue reference](https://docs.rexglue.com/reference/cvars/) to confirm
+the schema, not to assume every documented option exists in an older binary.
+
+## 4. Preserve audio, input and storage behavior
+
+Keep the native port's proven callback pacing and SDK queue back-pressure.
+Audio rate is `sample_rate / samples_per_block`; it is independent of a 30/60
+FPS cap. For a 48 kHz/256-sample callback the rate is 187.5 Hz. Do not turn
+off the audio correction when changing graphics or double-pace an SDK that
+already supplies it. Begin with modest gain, without a silent capture probe
+or inherited dummy audio backend on the ordinary play path.
+
+Use the actual compatible SDL library, not a symlink to the PC's filesystem.
+In Steam, add the native launcher as a Non-Steam Game with the correct working
+directory and a gamepad layout. Do not force Proton for a native Linux ELF.
+Verify physical/Steam Input enumeration and mapping on the Deck rather than
+claiming controller support from desktop success. Keep private data roots and
+any targeted storage completion adapter intact.
+
+## 5. Diagnose copy permissions before changing the runtime
+
+Transfers can strip executable bits even though file sizes are correct. A
+single `-x` failure does not distinguish missing files, permissions, unreadable
+paths or a `noexec` mount. On the destination copy, inspect:
+
+```bash
+ls -l bin/ld-linux-x86-64.so.2 bin/ironman2
+findmnt -T . -no TARGET,FSTYPE,OPTIONS
+```
+
+Those two names are IM2 examples; substitute the actual package's loader/game.
+For present files on an execution-enabled destination, restore owner execute
+bits to the relevant binaries/scripts and invoke a check script through Bash
+if its execute bit was lost. Missing files require a complete copy, not chmod.
+
+Distinguish these cases in launcher diagnostics. Automatic `chmod u+x` can
+repair a transfer's missing bits when permitted; do not attempt it as a way
+around an actual `noexec` mount. Move the whole bundle to a suitable user-owned
+execution-enabled directory instead of remounting or changing SteamOS.
+Preserve the loader's real error/status when a harmless `--version` probe
+fails. A permission change on the PC cannot repair a copy already on Deck.
+
+## 6. Validate in stages and record their limits
+
+1. Inspect files/architecture, relative manifest paths, modes and hashes.
+   Use the actual selected loader to resolve executable, SDK/plugin and adapter
+   dependencies. Keep this check free of guest, window, GPU and audio execution.
+2. Test a relocated bundle with spaces and a stand-in executable: verify actual
+   preload binding, arguments, user-data paths, profile validation and opt-outs
+   where supported. Test missing files, lost execute bits, loader failures and
+   simulated noexec diagnostics without mounting or running the game.
+3. Have an authorized on-device run establish startup and rendering. Preserve
+   its logs and distinguish manual permission repair from automatic recovery.
+4. Validate representative gameplay, sound, input, pause/resume, save/relaunch/
+   load, exit and sustained frame times as relevant. Measure before claiming
+   smooth gameplay, battery efficiency, stable FPS or all-level support.
+
+Keep assembly metadata and subsequent user results distinct. A title splash
+screen establishes startup rendering, not all gameplay. Identify which tests
+ran on the build PC, a mock/software backend, or the actual Deck. Preserve
+known shutdown/host issues unless independently repaired.
+
+Deliver the complete movable folder, active/default profile distinction,
+launch/Steam instructions, logs/check commands, relevant binary identities,
+known limits and safe update procedure. The
+[Valve specifications](https://www.steamdeck.com/en/tech) anchor the hardware
+target; the particular Deck's OS and driver versions still need checking.
